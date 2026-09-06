@@ -38,6 +38,49 @@ findings = audit_code(source)
 print(format_report(findings))
 ```
 
+### CLI
+
+```bash
+# Offline demo — audits the bundled vulnerable-code fixture, prints report, exit 0
+python3 firmware/ai_code_audit.py
+
+# Audit a single file or a whole directory tree
+python3 firmware/ai_code_audit.py path/to/file.py
+python3 firmware/ai_code_audit.py path/to/project/
+
+# JSON findings to reports/ (gitignored)
+python3 firmware/ai_code_audit.py --quiet --output reports/ai8-report.json
+
+# Gate CI on findings: exit 2 if anything is flagged
+python3 firmware/ai_code_audit.py --exit-code-on-findings path/to/project/
+echo $?    # 0 clean, 2 findings found, 1 error
+```
+
+### Exit Codes
+
+- `0` — audit clean (or completed with `--exit-code-on-findings` and no findings)
+- `1` — error (bad arguments / report write failure / unreadable file)
+- `2` — `--exit-code-on-findings` and at least one finding emitted
+
+### Live Lab Test Plan
+
+Runs entirely offline — the linter analyzes the bundled fixture
+`fixtures/sample-bad-code.py` (and any local files you point it at); nothing is
+downloaded and no external scanning service is queried.
+
+1. **Demo**: `python3 firmware/ai_code_audit.py` — expect findings across rules including `PROMPT-INJECTION` (an f-string LLM prompt sink). Exit `0`.
+2. **Fixture scan**: `python3 firmware/ai_code_audit.py fixtures/sample-bad-code.py --exit-code-on-findings; echo $?` — expect `2` (fixture is intentionally vulnerable).
+3. **Clean gate**: point the scanner at a directory of your own clean code — expect exit `0` and empty JSON `findings`.
+4. **JSON report**: `python3 firmware/ai_code_audit.py --quiet --output reports/ai8-report.json` — verify `finding_count` and `severity_summary` match the on-screen report.
+5. **Unit tests**: `python3 -m unittest discover -s tests -v` — all pass (rule triggers, clean-code negatives, line numbers, directory recursion, JSON report, exit-code gate).
+
+## Metrics
+
+- Real code paths exercised offline: rule engine over 13 `RULES` (incl. `HARDCODE-SECRET`, `SQL-CONCAT`, `EVAL-EXEC`, `PICKLE-DESERIAL`, `OS-SYSTEM`, `SUBPROCESS-SHELL`, `WEAK-CRYPTO`, `PATH-TRAVERSAL`, `TEMPFILE-INSECURE`, `PROMPT-INJECTION`), `audit_code`, `format_report`, recursive `audit_target`
+- Metrics emitted: per-finding `rule`/`severity`/`line`/`code`/`desc`/`fix`, `finding_count`, `severity_summary`
+- 10 unit tests; exit-code contract `0` clean / `1` error / `2` findings (gated)
+- Zero third-party dependencies (pure stdlib), fully offline
+
 ## Example Output
 
 ```

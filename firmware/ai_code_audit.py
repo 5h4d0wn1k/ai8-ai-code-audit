@@ -3,7 +3,9 @@ AI8 — AI Code Audit
 Heuristic security linter for AI-generated Python code.
 """
 
+import os
 import re
+import sys
 import keyword
 
 RULES = [
@@ -91,6 +93,17 @@ RULES = [
         "desc": "Insecure temporary file creation — race condition",
         "fix": "Use tempfile.mkstemp() or tempfile.NamedTemporaryFile() instead",
     },
+    {
+        "id": "PROMPT-INJECTION",
+        "pattern": re.compile(
+            r'(system|prompt|instructions)\s*=\s*(f["\']|["\'].*\{)|'
+            r'\.format\(.*user|f["\'].*(user_input|request|message|content)',
+            re.IGNORECASE),
+        "severity": "MEDIUM",
+        "desc": "Untrusted/user-controlled text interpolated into an LLM prompt — prompt-injection sink",
+        "fix": "Treat LLM instructions as untrusted data: keep system prompts static, sandbox user input, "
+               "and never let user content override the system prompt",
+    },
 ]
 
 SAMPLE_BAD_CODE = '''
@@ -135,6 +148,12 @@ def insecure_temp():
     # Insecure temp file
     import tempfile
     return tempfile.mktemp()
+
+def chat(request):
+    # Prompt-injection sink: user text spliced into the system prompt
+    system = f"You are a support agent. User says: {request.body}"
+    reply = llm_complete(system)
+    return reply
 '''
 
 
@@ -158,6 +177,40 @@ def audit_code(source_code):
     return findings
 
 
+def audit_file(path):
+    """Audit a single source file, returning (findings, error_or_None)."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            source = fh.read()
+    except OSError as exc:
+        return [], str(exc)
+    findings = audit_code(source)
+    for finding in findings:
+        finding["file"] = path
+    return findings, None
+
+
+def audit_target(target):
+    """Audit a file or directory tree. Returns (findings, errors list)."""
+    errors = []
+    findings = []
+    if os.path.isfile(target):
+        fs, err = audit_file(target)
+        if err:
+            errors.append(f"{target}: {err}")
+        findings.extend(fs)
+        return findings, errors
+    for root, _dirs, files in os.walk(target):
+        for name in sorted(files):
+            if name.endswith((".py", ".js", ".ts")):
+                path = os.path.join(root, name)
+                fs, err = audit_file(path)
+                if err:
+                    errors.append(f"{path}: {err}")
+                findings.extend(fs)
+    return findings, errors
+
+
 def format_report(findings):
     severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
     findings.sort(key=lambda f: severity_order.get(f["severity"], 99))
@@ -178,7 +231,8 @@ def format_report(findings):
     lines.append("")
 
     for i, f in enumerate(findings, 1):
-        lines.append(f"  [{f['severity']:8s}] #{f['rule']}")
+        location = f.get("file", "fixture")
+        lines.append(f"  [{f['severity']:8s}] #{f['rule']} ({location})")
         lines.append(f"    Line {f['line']}: {f['code']}")
         lines.append(f"    → {f['desc']}")
         lines.append(f"    Fix: {f['fix']}")
@@ -188,13 +242,55 @@ def format_report(findings):
     return "\n".join(lines)
 
 
-def main():
-    findings = audit_code(SAMPLE_BAD_CODE)
-    report = format_report(findings)
-    print(report)
-    return len(findings)
+def main(argv=None):
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(
+        prog="ai8-ai-code-audit",
+        description="Static rule-based linter for vulnerable AI/MLLM code patterns "
+                    "(eval, unsafe deserialization, prompt-injection sinks). "
+                    "Pure-Python, offline.")
+    parser.add_argument("target", nargs="?", default=None,
+                        help="file or directory to audit "
+                             "(default: bundled vulnerable-code fixture)")
+    parser.add_argument("--output", metavar="FILE",
+                        help="write JSON findings to FILE (e.g. reports/ai8-report.json)")
+    parser.add_argument("--exit-code-on-findings", action="store_true",
+                        help="exit 2 when any finding is emitted")
+    parser.add_argument("--quiet", action="store_true",
+                        help="suppress human-readable output")
+    args = parser.parse_args(argv)
+
+    if args.target is None:
+        findings = audit_code(SAMPLE_BAD_CODE)
+        for finding in findings:
+            finding["file"] = "fixtures/sample-bad-code.py (embedded)"
+    else:
+        findings, errors = audit_target(args.target)
+        for err in errors:
+            print(f"error: {err}", file=sys.stderr)
+
+    if args.output:
+        out_dir = os.path.dirname(os.path.abspath(args.output))
+        os.makedirs(out_dir, exist_ok=True)
+        with open(args.output, "w", encoding="utf-8") as fh:
+            json.dump({
+                "findings": findings,
+                "finding_count": len(findings),
+                "severity_summary": {
+                    sev: sum(1 for f in findings if f["severity"] == sev)
+                    for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+                },
+            }, fh, indent=2)
+
+    if not args.quiet:
+        print(format_report(list(findings)))
+
+    if args.exit_code_on_findings and findings:
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    n = main()
-    raise SystemExit(0)
+    raise SystemExit(main())
